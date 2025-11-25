@@ -547,11 +547,55 @@ void processDeleteID(uint16_t id) {
   if (finger.deleteModel(id) == FINGERPRINT_OK) {
     lcdAnim("DELETED!");
     successBeep();
+    
+    // Ask if they want to delete another user
+    if (askDeleteAnother()) {
+      enterDeleteMode(); // Go back to delete selection
+    } else {
+      enterNormalMode(); // Exit to normal mode
+    }
   } else {
     lcdAnim("ERROR!");
     failureBeep();
+    enterNormalMode();
   }
-  enterNormalMode();
+}
+
+bool askDeleteAnother() {
+  lcd.clear(); lcdCenter("Delete Another?", 0);
+  bool option = false; // false=NO, true=YES (safer default)
+  
+  // Initial Draw
+  lcd.setCursor(0,1); lcd.print("  YES > NO");
+  
+  unsigned long start = millis();
+  while (millis() - start < 10000) { // 10s timeout
+    // Simple polling for button
+    int state = digitalRead(BUTTON_PIN);
+    if (state == LOW) {
+      delay(20);
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        unsigned long pressTime = millis();
+        while(digitalRead(BUTTON_PIN) == LOW); // Wait release
+        unsigned long duration = millis() - pressTime;
+        
+        if (duration > 1000) { // Hold -> Select
+          beep(2000, 100);
+          lastActivityTime = millis(); // Reset global timeout
+          return option;
+        } else { // Click -> Toggle
+          beep(3000, 50);
+          lastActivityTime = millis(); // Reset global timeout
+          option = !option;
+          lcd.setCursor(0,1); 
+          if (option) lcd.print("> YES   NO");
+          else        lcd.print("  YES > NO");
+          start = millis(); // Reset timeout
+        }
+      }
+    }
+  }
+  return false; // Timeout defaults to NO
 }
 
 // ===================== ENROLL LOGIC =====================
@@ -623,9 +667,21 @@ bool enrollFingerprint(uint16_t id) {
   lcd.clear(); lcdCenter("Place Finger", 0); lcdCenter("Scan 1/2", 1);
   if (!getImageAndConvert(1)) return false;
   
-  // Duplicate Check
-  if (finger.fingerFastSearch() == FINGERPRINT_OK) {
-    lcdAnim("DUPLICATE!"); failureBeep(); return false;
+  // Duplicate Check - Search database for this fingerprint
+  lcd.clear(); lcdCenter("Checking...", 0); lcdCenter("Duplicate?", 1);
+  delay(300);
+  
+  uint8_t result = finger.fingerFastSearch();
+  if (result == FINGERPRINT_OK) {
+    // Duplicate found!
+    char dupBuf[17];
+    sprintf(dupBuf, "Found: ID #%03d", finger.fingerID);
+    lcd.clear();
+    lcdCenter("DUPLICATE!", 0);
+    lcdCenter(dupBuf, 1);
+    failureBeep();
+    delay(2500);
+    return false;
   }
 
   lcd.clear(); lcdCenter("Remove Finger", 0); delay(2000);
@@ -641,7 +697,25 @@ bool enrollFingerprint(uint16_t id) {
     if (!getImageAndConvert(2)) return false;
 
     if (finger.createModel() == FINGERPRINT_OK) {
-      // Success - store it
+      // Model created successfully - do final duplicate check
+      lcd.clear(); lcdCenter("Final Check...", 0);
+      delay(300);
+      
+      // Search again with the combined model
+      result = finger.fingerFastSearch();
+      if (result == FINGERPRINT_OK) {
+        // Duplicate found!
+        char dupBuf[17];
+        sprintf(dupBuf, "Found: ID #%03d", finger.fingerID);
+        lcd.clear();
+        lcdCenter("DUPLICATE!", 0);
+        lcdCenter(dupBuf, 1);
+        failureBeep();
+        delay(2500);
+        return false;
+      }
+      
+      // Success - No duplicate, store it
       if (finger.storeModel(id) != FINGERPRINT_OK) { 
         lcdAnim("SAVE ERROR"); 
         failureBeep(); 
