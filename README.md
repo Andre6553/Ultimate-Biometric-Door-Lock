@@ -104,7 +104,7 @@ Arduino Uno Connections:
 
 1. Clone this repository
    ```bash
-   git clone https://github.com/yourusername/biometric-security-system.git
+   git clone https://github.com/Andre6553/biometric-security-system.git
    ```
 
 2. Open `biometric_security_system_v2_1_final.ino` in Arduino IDE
