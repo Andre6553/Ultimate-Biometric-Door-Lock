@@ -1,5 +1,9 @@
 # Ultimate-Biometric-Door-Lock
-ULTIMATE BIOMETRIC DOOR LOCK – Built by Andre (South Africa) 🇿🇦 The most secure &amp; polished Arduino fingerprint lock in 2025.  If this saved you weeks of work or you’re using it commercially: →### Buy me a braai, a beer, or keep the lights on! 🇿🇦
+ULTIMATE BIOMETRIC DOOR LOCK – Built by Andre (South Africa) 🇿🇦 
+
+The most secure &amp; polished Arduino fingerprint lock in 2025.  
+
+If this saved you weeks of work or you’re using it commercially: →### Buy me a braai, a beer, or keep the lights on! 🇿🇦
 [![PayPal](https://img.shields.io/badge/PayPal-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/Elzanne6553)
 
 - [R100 – Coffee & rusks](https://paypal.me/Elzanne6553/100ZAR)  
