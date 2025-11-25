@@ -1,0 +1,768 @@
+/*
+   ULTIMATE BIOMETRIC DOOR LOCK – MENU VERSION (November 2025)
+   → Hold Button (2s) → ENTER MENU
+   → Click → Navigate Options
+   → Hold (2s) → Select Option
+   → Admin Security (ID 1-6) enforced for Enroll/Delete
+   → 100% No Duplicates
+*/
+
+#include <Adafruit_Fingerprint.h>
+#include <SoftwareSerial.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);   // Change to 0x3F if screen is blank
+
+#define FINGER_RX     2
+#define FINGER_TX     3
+#define BUZZER_PIN    5
+#define LED_RED       6
+#define LED_GREEN     9
+#define LED_BLUE     10
+#define BUTTON_PIN    8
+#define RELAY_PIN    12
+
+SoftwareSerial fingerSerial(FINGER_RX, FINGER_TX);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fingerSerial);
+
+#define ADMIN_MAX_ID     6
+#define RELAY_TIME       5000UL
+
+// Button Timing
+#define DEBOUNCE_MS      50
+#define HOLD_TIME_MS     2000
+#define RESET_HOLD_MS    10000
+
+bool firstAdminDone = false;
+
+// System Modes
+enum SystemMode { 
+  MODE_NORMAL, 
+  MODE_MENU, 
+  MODE_ADMIN_VERIFY, // Intermediate state to check admin before action
+  MODE_ENROLL, 
+  MODE_DELETE_SELECT, 
+  MODE_DELETE_CONFIRM,
+  MODE_FACTORY_RESET // Waiting for admin to confirm factory reset
+};
+SystemMode currentMode = MODE_NORMAL;
+SystemMode targetModeAfterVerify = MODE_NORMAL; // Where to go after admin check
+
+// Menu Items
+enum MenuItem { MENU_ENROLL, MENU_DELETE, MENU_RESET, MENU_EXIT };
+MenuItem currentMenuItem = MENU_ENROLL;
+const char* menuLabels[] = { "ENROLL NEW", "DELETE ID", "FACTORY RESET", "EXIT MENU" };
+#define MENU_ITEMS_COUNT 4
+
+// Global Variables
+uint16_t idToDelete = 1;
+uint16_t totalUsers = 0; // Total count of enrolled users
+uint16_t currentUserIndex = 0; // Current position (1-based) in the list of users
+unsigned long lastActivityTime = 0;
+unsigned long lastLcdUpdate = 0;
+int lcdPage = 0;
+
+// ===================== LCD HELPERS =====================
+void lcdCenter(const char* text, uint8_t row = 0) {
+  uint8_t len = strlen(text);
+  uint8_t start = (16 - len) / 2;
+  lcd.setCursor(start, row);
+  lcd.print(text);
+}
+void lcdAnim(const char* msg) {
+  lcd.clear();
+  lcdCenter("***", 0);
+  lcdCenter(msg, 1);
+  delay(800);
+}
+
+// ===================== RGB & SOUND =====================
+void setRGB(uint8_t r, uint8_t g, uint8_t b) {
+  analogWrite(LED_RED, r);
+  analogWrite(LED_GREEN, g);
+  analogWrite(LED_BLUE, b);
+}
+
+void updateStatusLED() {
+  if (currentMode == MODE_NORMAL) setRGB(0, 128, 0); // Green (Idle)
+  else if (currentMode == MODE_MENU) setRGB(0, 0, 255); // Blue (Menu)
+  else if (currentMode == MODE_ADMIN_VERIFY) setRGB(255, 255, 0); // Yellow (Auth)
+  else if (currentMode == MODE_ENROLL) setRGB(128, 0, 128); // Purple (Enroll)
+  else if (currentMode == MODE_DELETE_SELECT || currentMode == MODE_DELETE_CONFIRM) setRGB(255, 100, 0); // Orange (Delete)
+}
+
+void flashGreen(int n) { for(int i=0; i<n; i++) { setRGB(0,255,0); delay(200); setRGB(0,0,0); delay(200); } updateStatusLED(); }
+void flashRed(int n)   { for(int i=0; i<n; i++) { setRGB(255,0,0); delay(100); setRGB(0,0,0); delay(100); } updateStatusLED(); }
+
+void beep(uint16_t f, uint16_t d) { tone(BUZZER_PIN, f, d); delay(d + 20); noTone(BUZZER_PIN); }
+void successBeep() { beep(2000,120); beep(2800,300); }
+void failureBeep() { for(int f=900; f>200; f-=200) beep(f,160); }
+
+// ===================== SETUP =====================
+void setup() {
+  Serial.begin(57600);
+  lcd.init(); lcd.backlight();
+  
+  // Boot Screen
+  lcd.clear(); lcdCenter("BIOMETRIC",0); lcdCenter("SYSTEM V2.1",1);
+  delay(2000);
+
+  fingerSerial.begin(57600);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  digitalWrite(RELAY_PIN, LOW);
+
+  pinMode(LED_RED, OUTPUT); pinMode(LED_GREEN, OUTPUT); pinMode(LED_BLUE, OUTPUT);
+  
+  if (!finger.verifyPassword()) {
+    lcd.clear(); lcdCenter("SENSOR ERROR",0);
+    while(1) { flashRed(1); }
+  }
+
+  finger.getTemplateCount();
+  if (finger.templateCount == 0) {
+    // First-time setup - no security, bypass all checks
+    lcd.clear();
+    lcdCenter("FIRST TIME SETUP", 0);
+    lcdCenter("Enroll Admin #1", 1);
+    beep(2500, 300);
+    delay(2000);
+    
+    // Keep trying until successful
+    while (!enrollFingerprint(1)) {
+      lcd.clear();
+      lcdCenter("FAILED", 0);
+      lcdCenter("Try Again", 1);
+      delay(1500);
+    }
+    
+    lcd.clear();
+    lcdCenter("SETUP COMPLETE!", 0);
+    lcdCenter("Admin #1 Ready", 1);
+    successBeep();
+    delay(2000);
+    firstAdminDone = true;
+  } else {
+    firstAdminDone = true;
+  }
+
+  enterNormalMode();
+}
+
+// ===================== MAIN LOOP =====================
+void loop() {
+  // Check for empty database periodically (every 5 seconds in normal mode)
+  static unsigned long lastUserCheck = 0;
+  if (currentMode == MODE_NORMAL && millis() - lastUserCheck > 5000) {
+    lastUserCheck = millis();
+    finger.getTemplateCount();
+    if (finger.templateCount == 0) {
+      // All users deleted - enter first-time setup
+      lcd.clear();
+      lcdCenter("NO USERS!", 0);
+      lcdCenter("Setup Mode...", 1);
+      beep(3000, 500);
+      delay(2000);
+      setup(); // Re-run setup which will detect 0 users and enter first-time setup
+      return;
+    }
+  }
+  
+  handleButton();
+  handleDeleteFastScroll(); // Handle fast scroll in delete mode
+  
+  // Normal Mode: Cycle Instructions
+  if (currentMode == MODE_NORMAL) {
+    if (millis() - lastLcdUpdate > 3000) {
+      lastLcdUpdate = millis();
+      lcdPage = !lcdPage;
+      lcd.setCursor(0,1); lcd.print("                ");
+      lcd.setCursor(0,1);
+      if (lcdPage == 0) lcdCenter("Place Finger", 1);
+      else lcdCenter("Hold Btn->Menu", 1);
+    }
+    
+    // Check Finger
+    int fid = getFingerprintID();
+    if (fid > 0) {
+      grantAccess(fid);
+    }
+  }
+  
+  // Menu Mode: Display Options
+  else if (currentMode == MODE_MENU) {
+    // Auto-exit after 20 seconds of inactivity
+    if (millis() - lastActivityTime > 20000) {
+      lcdAnim("TIMEOUT");
+      beep(2500, 200);
+      enterNormalMode();
+    }
+  }
+  
+  // Admin Verify Mode
+  else if (currentMode == MODE_ADMIN_VERIFY) {
+    int fid = getFingerprintID();
+    if (fid > 0 && fid <= ADMIN_MAX_ID) {
+      successBeep();
+      lcdAnim("ADMIN OK");
+      if (targetModeAfterVerify == MODE_ENROLL) enterEnrollMode();
+      else if (targetModeAfterVerify == MODE_DELETE_SELECT) enterDeleteMode();
+      else if (targetModeAfterVerify == MODE_MENU) enterMenuMode();
+      else if (targetModeAfterVerify == MODE_FACTORY_RESET) {
+        // Ask for final confirmation
+        if (confirmFactoryReset()) {
+          fullReset(); // User confirmed - proceed with reset
+        } else {
+          lcdAnim("CANCELLED");
+          beep(2500, 200);
+          enterNormalMode();
+        }
+      }
+    } else if (fid > 0) {
+      failureBeep();
+      lcdAnim("NOT ADMIN!");
+      delay(1000);
+      enterNormalMode();
+    }
+  }
+  
+  // Enroll Mode - timeout
+  else if (currentMode == MODE_ENROLL) {
+    if (millis() - lastActivityTime > 20000) {
+      lcdAnim("TIMEOUT");
+      beep(2500, 200);
+      enterNormalMode();
+    }
+  }
+  
+  // Delete Select Mode
+  else if (currentMode == MODE_DELETE_SELECT) {
+    // Auto-exit after 20 seconds of inactivity
+    if (millis() - lastActivityTime > 20000) {
+      lcdAnim("TIMEOUT");
+      beep(2500, 200);
+      enterNormalMode();
+    }
+  }
+}
+
+// ===================== BUTTON LOGIC (FIXED) =====================
+void handleButton() {
+  static int lastState = HIGH;
+  static unsigned long pressTime = 0;
+  int state = digitalRead(BUTTON_PIN);
+
+  if (lastState == HIGH && state == LOW) { // Press
+    pressTime = millis();
+    delay(DEBOUNCE_MS); 
+  }
+  else if (lastState == LOW && state == HIGH) { // Release
+    unsigned long duration = millis() - pressTime;
+    lastActivityTime = millis();
+
+    if (duration < HOLD_TIME_MS) {
+      onButtonClick();
+    } 
+  }
+  else if (state == LOW) { // Holding
+    unsigned long duration = millis() - pressTime;
+    if (duration > HOLD_TIME_MS && duration < HOLD_TIME_MS + 500) {
+      // Trigger Hold Action once
+      onButtonHold();
+      // Prevent re-triggering by setting pressTime far back? 
+      // Better: use a flag. For simplicity, we rely on the gap.
+      pressTime -= 1000; 
+    }
+    if (duration > RESET_HOLD_MS) {
+      // Require admin verification for factory reset
+      lcd.clear();
+      lcdCenter("RESET REQUEST", 0);
+      lcdCenter("Scan Admin...", 1);
+      beep(3000, 500);
+      delay(1000);
+      targetModeAfterVerify = MODE_FACTORY_RESET;
+      enterAdminVerify();
+      pressTime = 0; // Prevent re-trigger
+    }
+  }
+  lastState = state;
+}
+
+void onButtonClick() {
+  beep(3000, 50);
+  
+  if (currentMode == MODE_MENU) {
+    // Cycle Menu
+    currentMenuItem = (MenuItem)((currentMenuItem + 1) % MENU_ITEMS_COUNT);
+    updateMenuLCD();
+  }
+  else if (currentMode == MODE_DELETE_SELECT) {
+    // Move to next existing user
+    idToDelete = findNextExistingUser(idToDelete);
+    updateDeleteLCD();
+  }
+}
+
+void handleDeleteFastScroll() {
+  static int lastState = HIGH;
+  static unsigned long holdStartTime = 0;
+  static unsigned long lastScrollTime = 0;
+  int state = digitalRead(BUTTON_PIN);
+
+  if (currentMode != MODE_DELETE_SELECT) return;
+
+  if (lastState == HIGH && state == LOW) {
+    holdStartTime = millis();
+  }
+  else if (state == LOW) { // Button is held
+    unsigned long holdDuration = millis() - holdStartTime;
+    
+    if (holdDuration > 3000) { // Hold >3s triggers auto-scroll
+      if (millis() - lastScrollTime > 2500) { // Scroll every 2.5s
+        idToDelete = findNextExistingUser(idToDelete);
+        updateDeleteLCD();
+        beep(3500, 30); // Quick beep for feedback
+        lastScrollTime = millis();
+      }
+    }
+  }
+  else if (lastState == LOW && state == HIGH) { // Released
+    unsigned long holdDuration = millis() - holdStartTime;
+    if (holdDuration > 3000) {
+      // Just released from fast scroll - confirm this ID
+      beep(2000, 100);
+      delay(500);
+      processDeleteID(idToDelete);
+    } else if (holdDuration > HOLD_TIME_MS) {
+      // Normal hold - confirm this ID
+      processDeleteID(idToDelete);
+    }
+  }
+  
+  lastState = state;
+}
+
+void onButtonHold() {
+  beep(2000, 200);
+  
+  if (currentMode == MODE_NORMAL) {
+    // Require Admin to Enter Menu
+    targetModeAfterVerify = MODE_MENU;
+    enterAdminVerify();
+  }
+  else if (currentMode == MODE_MENU) {
+    executeMenuItem();
+  }
+  // Delete mode fast scroll handled separately
+}
+
+// ===================== MODES & ACTIONS =====================
+void enterNormalMode() {
+  currentMode = MODE_NORMAL;
+  updateStatusLED();
+  lcd.clear();
+  lcdCenter("SYSTEM READY", 0);
+  lcdCenter("Place Finger", 1);
+}
+
+void enterMenuMode() {
+  currentMode = MODE_MENU;
+  currentMenuItem = MENU_ENROLL;
+  lastActivityTime = millis(); // Start inactivity timer
+  updateStatusLED();
+  lcd.clear();
+  lcdCenter("MAIN MENU", 0);
+  updateMenuLCD();
+}
+
+void updateMenuLCD() {
+  lcd.setCursor(0,1); lcd.print("                "); // Clear line
+  lcdCenter(menuLabels[currentMenuItem], 1);
+  // Arrows
+  lcd.setCursor(0,1); lcd.print("<");
+  lcd.setCursor(15,1); lcd.print(">");
+}
+
+void executeMenuItem() {
+  switch (currentMenuItem) {
+    case MENU_ENROLL:
+      enterEnrollMode();
+      break;
+    case MENU_DELETE:
+      enterDeleteMode();
+      break;
+    case MENU_RESET:
+      fullReset();
+      break;
+    case MENU_EXIT:
+      enterNormalMode();
+      break;
+  }
+}
+
+void enterAdminVerify() {
+  currentMode = MODE_ADMIN_VERIFY;
+  updateStatusLED();
+  lcd.clear();
+  lcdCenter("SECURITY CHECK", 0);
+  lcdCenter("Admin Finger...", 1);
+}
+
+// ===================== DELETE LOGIC =====================
+uint16_t findNextExistingUser(uint16_t startID) {
+  // Find next existing user after startID (wraps around)
+  for (uint16_t i = startID + 1; i <= 162; i++) {
+    if (finger.loadModel(i) == FINGERPRINT_OK) return i;
+  }
+  // Wrap around to beginning
+  for (uint16_t i = 1; i < startID; i++) {
+    if (finger.loadModel(i) == FINGERPRINT_OK) return i;
+  }
+  return startID; // No other users found
+}
+
+uint16_t findPrevExistingUser(uint16_t startID) {
+  // Find previous existing user before startID (wraps around)
+  for (int i = startID - 1; i >= 1; i--) {
+    if (finger.loadModel(i) == FINGERPRINT_OK) return i;
+  }
+  // Wrap around to end
+  for (uint16_t i = 162; i > startID; i--) {
+    if (finger.loadModel(i) == FINGERPRINT_OK) return i;
+  }
+  return startID; // No other users found
+}
+
+uint16_t getCurrentUserPosition(uint16_t targetID) {
+  // Calculate position of targetID in the list of existing users
+  uint16_t position = 0;
+  for (uint16_t i = 1; i <= 162; i++) {
+    if (finger.loadModel(i) == FINGERPRINT_OK) {
+      position++;
+      if (i == targetID) return position;
+    }
+  }
+  return position;
+}
+
+void enterDeleteMode() {
+  currentMode = MODE_DELETE_SELECT;
+  lastActivityTime = millis(); // Reset timeout timer
+  
+  // Get total user count
+  finger.getTemplateCount();
+  totalUsers = finger.templateCount;
+  
+  if (totalUsers == 0) {
+    lcdAnim("NO USERS!");
+    beep(2500, 200);
+    enterNormalMode();
+    return;
+  }
+  
+  // Find first existing user
+  idToDelete = 0;
+  for (uint16_t i = 1; i <= 162; i++) {
+    if (finger.loadModel(i) == FINGERPRINT_OK) {
+      idToDelete = i;
+      break;
+    }
+  }
+  
+  currentUserIndex = 1;
+  lastActivityTime = millis();
+  updateStatusLED();
+  lcd.clear();
+  lcdCenter("SELECT USER:", 0);
+  updateDeleteLCD();
+}
+
+void updateDeleteLCD() {
+  currentUserIndex = getCurrentUserPosition(idToDelete);
+  char buf[17];
+  sprintf(buf, "ID #%03d (%d/%d)", idToDelete, currentUserIndex, totalUsers);
+  lcd.setCursor(0, 1);
+  lcd.print("                "); // Clear line
+  lcdCenter(buf, 1);
+}
+
+bool confirmDelete(uint16_t id) {
+  lcd.clear();
+  char buf[17];
+  sprintf(buf, "Delete ID #%03d?", id);
+  lcdCenter(buf, 0);
+  
+  bool option = false; // false=NO, true=YES (safer default)
+  lcd.setCursor(0,1); lcd.print("  YES > NO");
+  
+  unsigned long start = millis();
+  while (millis() - start < 10000) { // 10s timeout
+    int state = digitalRead(BUTTON_PIN);
+    if (state == LOW) {
+      delay(20);
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        unsigned long pressTime = millis();
+        while(digitalRead(BUTTON_PIN) == LOW); // Wait release
+        unsigned long duration = millis() - pressTime;
+        
+        if (duration > 1000) { // Hold -> Select
+          beep(2000, 100);
+          lastActivityTime = millis(); // Reset global timeout
+          return option;
+        } else { // Click -> Toggle
+          beep(3000, 50);
+          lastActivityTime = millis(); // Reset global timeout
+          option = !option;
+          lcd.setCursor(0,1); 
+          if (option) lcd.print("> YES   NO");
+          else        lcd.print("  YES > NO");
+          start = millis(); // Reset timeout
+        }
+      }
+    }
+  }
+  return false; // Timeout defaults to NO
+}
+
+void processDeleteID(uint16_t id) {
+  // Check if ID exists
+  if (finger.loadModel(id) != FINGERPRINT_OK) {
+    lcdAnim("ID EMPTY");
+    failureBeep();
+    enterDeleteMode(); // Retry
+    return;
+  }
+
+  // Ask for confirmation
+  if (!confirmDelete(id)) {
+    lcdAnim("CANCELLED");
+    beep(2500, 200);
+    enterDeleteMode(); // Return to selection
+    return;
+  }
+  
+  // User confirmed YES - proceed with deletion
+  if (finger.deleteModel(id) == FINGERPRINT_OK) {
+    lcdAnim("DELETED!");
+    successBeep();
+  } else {
+    lcdAnim("ERROR!");
+    failureBeep();
+  }
+  enterNormalMode();
+}
+
+// ===================== ENROLL LOGIC =====================
+// ===================== ENROLL LOGIC =====================
+bool askAddAnother() {
+  lcd.clear(); lcdCenter("Add Another?", 0);
+  bool option = true; // true=YES, false=NO
+  
+  // Initial Draw
+  lcd.setCursor(0,1); lcd.print("> YES   NO");
+  
+  unsigned long start = millis();
+  while (millis() - start < 10000) { // 10s timeout
+    // Simple polling for button
+    int state = digitalRead(BUTTON_PIN);
+    if (state == LOW) {
+      delay(20);
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        unsigned long pressTime = millis();
+        while(digitalRead(BUTTON_PIN) == LOW); // Wait release
+        unsigned long duration = millis() - pressTime;
+        
+        if (duration > 1000) { // Hold -> Select
+          beep(2000, 100);
+          lastActivityTime = millis(); // Reset global timeout
+          return option;
+        } else { // Click -> Toggle
+          beep(3000, 50);
+          lastActivityTime = millis(); // Reset global timeout
+          option = !option;
+          lcd.setCursor(0,1); 
+          if (option) lcd.print("> YES   NO");
+          else        lcd.print("  YES > NO");
+          start = millis(); // Reset timeout
+        }
+      }
+    }
+  }
+  return false; // Timeout defaults to NO
+}
+
+void enterEnrollMode() {
+  currentMode = MODE_ENROLL;
+  updateStatusLED();
+  lastActivityTime = millis(); // Reset timeout timer
+  
+  while (true) {
+    uint16_t id = findNextFreeID();
+    if (id == 0) { lcdAnim("DB FULL"); break; }
+    
+    if (enrollFingerprint(id)) {
+      // Success - Ask to add another
+      if (!askAddAnother()) break;
+    } else {
+      // Failed - Ask to retry? Or just break?
+      // Usually better to break or retry same ID. 
+      // Let's break to be safe/simple.
+      break;
+    }
+  }
+  enterNormalMode();
+}
+
+bool enrollFingerprint(uint16_t id) {
+  lcd.clear(); lcdCenter("Enroll New", 0);
+  char buf[17]; sprintf(buf, "ID #%03d", id); lcdCenter(buf, 1);
+  delay(1500);
+
+  lcd.clear(); lcdCenter("Place Finger", 0); lcdCenter("Scan 1/2", 1);
+  if (!getImageAndConvert(1)) return false;
+  
+  // Duplicate Check
+  if (finger.fingerFastSearch() == FINGERPRINT_OK) {
+    lcdAnim("DUPLICATE!"); failureBeep(); return false;
+  }
+
+  lcd.clear(); lcdCenter("Remove Finger", 0); delay(2000);
+  while(finger.getImage() != FINGERPRINT_NOFINGER);
+
+  // Try 2nd scan (with retry on mismatch)
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    lcd.clear(); 
+    lcdCenter("Place Again", 0); 
+    if (attempt == 1) lcdCenter("Scan 2/2", 1);
+    else lcdCenter("Scan 3/3 (Retry)", 1);
+    
+    if (!getImageAndConvert(2)) return false;
+
+    if (finger.createModel() == FINGERPRINT_OK) {
+      // Success - store it
+      if (finger.storeModel(id) != FINGERPRINT_OK) { 
+        lcdAnim("SAVE ERROR"); 
+        failureBeep(); 
+        return false; 
+      }
+      lcdAnim("SUCCESS!"); 
+      successBeep();
+      return true;
+    }
+    
+    // Mismatch
+    if (attempt == 1) {
+      lcdAnim("MISMATCH"); 
+      failureBeep();
+      delay(1000);
+      lcd.clear(); lcdCenter("Remove Finger", 0); delay(1500);
+      while(finger.getImage() != FINGERPRINT_NOFINGER);
+      // Loop will retry
+    } else {
+      // Final attempt failed
+      lcdAnim("MISMATCH"); 
+      failureBeep();
+      return false;
+    }
+  }
+  
+  return false;
+}
+
+bool getImageAndConvert(uint8_t slot) {
+  unsigned long start = millis();
+  while (millis() - start < 10000) { // 10s timeout
+    int p = finger.getImage();
+    if (p == FINGERPRINT_OK) {
+      beep(2500, 50);
+      return (finger.image2Tz(slot) == FINGERPRINT_OK);
+    }
+  }
+  lcdAnim("TIMEOUT");
+  return false;
+}
+
+uint16_t findNextFreeID() {
+  for (uint16_t i = 1; i <= 162; i++)
+    if (finger.loadModel(i) != FINGERPRINT_OK) return i;
+  return 0;
+}
+
+// ===================== CORE FUNCTIONS =====================
+int getFingerprintID() {
+  uint8_t p = finger.getImage();
+  if (p != FINGERPRINT_OK) return -1;
+  p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) return -1;
+  p = finger.fingerFastSearch();
+  if (p == FINGERPRINT_OK) return finger.fingerID;
+  
+  if (p == FINGERPRINT_NOTFOUND) {
+    lcdAnim("USER UNKNOWN");
+    failureBeep();
+    // Restore screen after feedback
+    if (currentMode == MODE_NORMAL) {
+      lcd.clear(); lcdCenter("Place Finger", 1);
+    }
+  }
+  return -1;
+}
+
+void grantAccess(int id) {
+  lcd.clear();
+  lcdCenter("ACCESS GRANTED", 0);
+  char buf[17]; sprintf(buf, "ID #%03d", id); lcdCenter(buf, 1);
+  successBeep();
+  setRGB(0, 255, 0);
+  digitalWrite(RELAY_PIN, HIGH);
+  delay(RELAY_TIME);
+  digitalWrite(RELAY_PIN, LOW);
+  enterNormalMode();
+}
+
+bool confirmFactoryReset() {
+  lcd.clear();
+  lcdCenter("FACTORY RESET?", 0);
+  
+  bool option = false; // false=NO, true=YES (safer default)
+  lcd.setCursor(0,1); lcd.print("  YES > NO");
+  
+  unsigned long start = millis();
+  while (millis() - start < 10000) { // 10s timeout
+    int state = digitalRead(BUTTON_PIN);
+    if (state == LOW) {
+      delay(20);
+      if (digitalRead(BUTTON_PIN) == LOW) {
+        unsigned long pressTime = millis();
+        while(digitalRead(BUTTON_PIN) == LOW); // Wait release
+        unsigned long duration = millis() - pressTime;
+        
+        if (duration > 1000) { // Hold -> Select
+          beep(2000, 100);
+          lastActivityTime = millis(); // Reset global timeout
+          return option;
+        } else { // Click -> Toggle
+          beep(3000, 50);
+          lastActivityTime = millis(); // Reset global timeout
+          option = !option;
+          lcd.setCursor(0,1); 
+          if (option) lcd.print("> YES   NO");
+          else        lcd.print("  YES > NO");
+          start = millis(); // Reset timeout
+        }
+      }
+    }
+  }
+  return false; // Timeout defaults to NO
+}
+
+void fullReset() {
+  lcdAnim("FACTORY RESET");
+  setRGB(255,0,0);
+  tone(BUZZER_PIN, 600, 2000); delay(2000);
+  finger.emptyDatabase();
+  firstAdminDone = false;
+  setup();
+}
