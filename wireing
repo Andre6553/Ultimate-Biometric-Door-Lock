@@ -1,34 +1,48 @@
-                    ULTIMATE BIOMETRIC DOOR LOCK – WIRING
-                              Arduino UNO
-                ┌────────────────────────────────────────────┐
-                │                                            │
-5V ────────────┤ 5V                                        │
-GND ───────────┤ GND                                       │
-                │                                            │
-A4 ────────────┤ → SDA → I2C LCD 16×2 (address 0x27 or 0x3F)   │
-A5 ────────────┤ → SCL → I2C LCD                           │
-                │                                            │
-Pin 2 ─────────┤ RX  ← TX  ← Fingerprint Sensor (R307/AS608)│
-Pin 3 ─────────┤ TX  → RX  → Fingerprint Sensor            │
-5V  ───────────┤ → VCC → Fingerprint Sensor                │
-GND ───────────┤ → GND → Fingerprint Sensor                │
-                │                                            │
-Pin 5 ─────────┤ → + → Active Buzzer                        │
-GND ───────────┤ → – → Buzzer                              │
-                │                                            │
-Pin 6 ─────────┤ → Red     ├─220Ω─┐                        │
-Pin 9 ─────────┤ → Green   ├─220Ω─│─→ RGB LED (Common Cathode)│
-Pin 10 ────────┤ → Blue    ├─220Ω─┘                        │
-GND ───────────┤ → Long leg (Cathode) → RGB LED           │
-                │                                            │
-Pin 8 ─────────┤ → One leg → Push Button                  │
-GND ───────────┤ → Other leg → Push Button                │
-                │                                            │
-Pin 12 ────────┤ → IN → 5V Relay Module                   │
-5V  ───────────┤ → VCC → Relay Module                     │
-GND ───────────┤ → GND → Relay Module                     │
-                └────────────────────────────────────────────┘
+╔══════════════════════════════════════════════════════════════╗
+║                ULTIMATE BIOMETRIC DOOR LOCK                  ║
+║                        WIRING DIAGRAM                        ║
+║                        Arduino UNO                           ║
+╚══════════════════════════════════════════════════════════════╝
 
-                          POWER
-                5V rail → All VCC
-                GND rail → All GND (common ground!)
+POWER (use breadboard rails)
+├─ 5V rail  → All VCC connections
+└─ GND rail → All GND connections (common ground!)
+
+ARDUINO PIN → COMPONENT
+──────────────────────────────────────────────────────────────
+5V           → Fingerprint Sensor VCC
+             → LCD VCC
+             → Relay VCC
+             → Buzzer + (optional)
+             
+GND          → Fingerprint Sensor GND
+             → LCD GND
+             → Relay GND
+             → Buzzer –
+             → RGB LED cathode (long leg)
+             → Push button (one leg)
+
+A4           → LCD SDA
+A5           → LCD SCL
+
+2            → Fingerprint Sensor TX  (Software RX)
+3            → Fingerprint Sensor RX  (Software TX)
+
+5            → Active Buzzer (+)
+
+6            → RGB LED Red     → 220Ω resistor
+9            → RGB LED Green   → 220Ω resistor
+10           → RGB LED Blue    → 220Ω resistor
+
+8            → Push Button (other leg)
+
+12           → Relay Module IN
+
+──────────────────────────────────────────────────────────────
+LCD I2C Address: usually 0x27 (if blank screen → try 0x3F)
+
+RGB LED: Common Cathode (long leg = GND)
+
+Relay: 5V single-channel module (NO/COM for electric lock)
+
+Push Button: Connected between Pin 8 and GND (internal pull-up used)
