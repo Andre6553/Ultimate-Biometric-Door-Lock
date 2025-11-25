@@ -104,7 +104,7 @@ Arduino Uno Connections:
 
 1. Clone this repository
    ```bash
-   git clone https://github.com/Andre6553/biometric-security-system.git
+   git clone https://github.com/Andre6553/biometric-security-system.git](https://github.com/Andre6553/Ultimate-Biometric-Door-Lock)
    ```
 
 2. Open `biometric_security_system_v2_1_final.ino` in Arduino IDE
