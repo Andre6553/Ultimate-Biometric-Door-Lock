@@ -103,15 +103,16 @@ Arduino Uno Connections:
 ### 2. Upload Code
 
 1. Clone this repository
+Bash
  git clone https://github.com/Andre6553/Ultimate-Biometric-Door-Lock.git
 
-2. Open `biometric_security_system_v2_1_final.ino` in Arduino IDE
+3. Open `biometric_security_system_v2_1_final.ino` in Arduino IDE
 
-3. Select **Tools → Board → Arduino Uno**
+4. Select **Tools → Board → Arduino Uno**
 
-4. Select your COM port
+5. Select your COM port
 
-5. Click **Upload**
+6. Click **Upload**
 
 ### 3. First-Time Setup
 
