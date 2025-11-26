@@ -117,8 +117,22 @@ void setup() {
   pinMode(LED_RED, OUTPUT); pinMode(LED_GREEN, OUTPUT); pinMode(LED_BLUE, OUTPUT);
   
   if (!finger.verifyPassword()) {
-    lcd.clear(); lcdCenter("SENSOR ERROR",0);
-    while(1) { flashRed(1); }
+    lcd.clear();
+    lcdCenter("SENSOR ERROR",0);
+    lcdCenter("Reset Board", 1);
+
+    while (!finger.verifyPassword()) {
+      lcdCenter("Check in 5s...", 1);
+      // Flash red to indicate error
+      for (int i = 0; i < 5; i++) {
+        flashRed(1); // 200ms
+        delay(800);  // Wait 800ms -> Total 1s per iteration
+      }
+    }
+    // If we exit the loop, sensor is found
+    lcd.clear(); lcdCenter("SENSOR FOUND", 0);
+    successBeep();
+    delay(1500);
   }
 
   finger.getTemplateCount();
@@ -180,7 +194,7 @@ void loop() {
       lcdPage = !lcdPage;
       lcd.setCursor(0,1); lcd.print("                ");
       lcd.setCursor(0,1);
-      if (lcdPage == 0) lcdCenter("Place Finger", 1);
+      if (lcdPage == 0) lcdCenter("Scan Finger", 1);
       else lcdCenter("Hold Btn->Menu", 1);
     }
     
@@ -364,7 +378,7 @@ void enterNormalMode() {
   updateStatusLED();
   lcd.clear();
   lcdCenter("SYSTEM READY", 0);
-  lcdCenter("Place Finger", 1);
+  lcdCenter("Scan Finger", 1);
 }
 
 void enterMenuMode() {
@@ -394,7 +408,7 @@ void executeMenuItem() {
       enterDeleteMode();
       break;
     case MENU_RESET:
-      fullReset();
+      handleFactoryReset();
       break;
     case MENU_EXIT:
       enterNormalMode();
@@ -552,7 +566,7 @@ void processDeleteID(uint16_t id) {
     if (askDeleteAnother()) {
       enterDeleteMode(); // Go back to delete selection
     } else {
-      enterNormalMode(); // Exit to normal mode
+      enterMenuMode(); // Return to main menu
     }
   } else {
     lcdAnim("ERROR!");
@@ -656,7 +670,7 @@ void enterEnrollMode() {
       break;
     }
   }
-  enterNormalMode();
+  enterMenuMode();
 }
 
 bool enrollFingerprint(uint16_t id) {
@@ -664,7 +678,7 @@ bool enrollFingerprint(uint16_t id) {
   char buf[17]; sprintf(buf, "ID #%03d", id); lcdCenter(buf, 1);
   delay(1500);
 
-  lcd.clear(); lcdCenter("Place Finger", 0); lcdCenter("Scan 1/2", 1);
+  lcd.clear(); lcdCenter("Scan Finger", 0); lcdCenter("Scan 1/2", 1);
   if (!getImageAndConvert(1)) return false;
   
   // Duplicate Check - Search database for this fingerprint
@@ -690,7 +704,7 @@ bool enrollFingerprint(uint16_t id) {
   // Try 2nd scan (with retry on mismatch)
   for (int attempt = 1; attempt <= 2; attempt++) {
     lcd.clear(); 
-    lcdCenter("Place Again", 0); 
+    lcdCenter("Scan Again", 0); 
     if (attempt == 1) lcdCenter("Scan 2/2", 1);
     else lcdCenter("Scan 3/3 (Retry)", 1);
     
@@ -778,7 +792,7 @@ int getFingerprintID() {
     failureBeep();
     // Restore screen after feedback
     if (currentMode == MODE_NORMAL) {
-      lcd.clear(); lcdCenter("Place Finger", 1);
+      lcd.clear(); lcdCenter("Scan Finger", 1);
     }
   }
   return -1;
@@ -793,6 +807,60 @@ void grantAccess(int id) {
   digitalWrite(RELAY_PIN, HIGH);
   delay(RELAY_TIME);
   digitalWrite(RELAY_PIN, LOW);
+  enterNormalMode();
+}
+
+void handleFactoryReset() {
+  // First, ask user if they want to reset
+  if (!confirmFactoryReset()) {
+    lcdAnim("CANCELLED");
+    beep(2500, 200);
+    enterMenuMode(); // Return to menu
+    return;
+  }
+  
+  // User confirmed YES - now verify admin fingerprint (2 attempts)
+  lcd.clear();
+  lcdCenter("ADMIN VERIFY", 0);
+  lcdCenter("Scan Finger...", 1);
+  beep(3000, 300);
+  
+  for (int attempt = 1; attempt <= 2; attempt++) {
+    unsigned long startTime = millis();
+    bool authenticated = false;
+    
+    // Wait up to 10 seconds for fingerprint
+    while (millis() - startTime < 10000) {
+      int fid = getFingerprintID();
+      if (fid > 0 && fid <= ADMIN_MAX_ID) {
+        // Admin verified successfully
+        successBeep();
+        lcdAnim("ADMIN OK");
+        fullReset(); // Perform the reset
+        return;
+      } else if (fid > 0) {
+        // Not an admin
+        failureBeep();
+        lcdAnim("NOT ADMIN!");
+        delay(1000);
+        break; // Exit the wait loop to try again or fail
+      }
+    }
+    
+    // If first attempt failed, give one more chance
+    if (attempt == 1) {
+      lcd.clear();
+      lcdCenter("TRY AGAIN", 0);
+      lcdCenter("Scan Admin...", 1);
+      beep(2000, 200);
+      delay(1000);
+    }
+  }
+  
+  // Both attempts failed - return to normal mode
+  lcdAnim("FAILED");
+  failureBeep();
+  delay(1000);
   enterNormalMode();
 }
 
